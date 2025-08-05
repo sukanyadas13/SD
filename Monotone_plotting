@@ -1,0 +1,354 @@
+### monotonic curve plotting using  mgcv 
+
+### loading library
+library(mgcv)
+library(splines)
+library(plot3D)
+library(gplots)
+### Plotting 1D non-decreasing density curve 
+
+Plot1DMonoDen<-function(dat1, plotI=TRUE, breaks = "Sturges", 
+                        mains="Histogram with Monotonic Density",
+                        xlab = "Censoring Time"){
+  ## 1 ─ histogram ----------------------------------------------------------
+  h  <- hist(dat1, plot = plotI, breaks = breaks,col = "white",
+             freq = FALSE, main = mains, xlab = xlab)
+  x1 <- h$mids
+  y  <- h$density
+  maxx  <- max(dat1)
+  ## 2 ─ B-spline basis -----------------------------------------------------
+  X  <- bs(x1, df = 8, intercept = TRUE,
+           Boundary.knots = c(0, maxx))   # <<< ensures 0 is inside range
+  ncoef <- ncol(X)
+  
+  ## 3 ─ smoothness penalty (second-order diffs) ----------------------------
+  D1 <- diff(diag(ncoef), differences = 2)
+  S  <- list(t(D1) %*% D1)
+  
+  ## 4 ─ inequality constraints --------------------------------------------
+  A_mono <- diff(diag(ncoef))                    # 1st diff ≥ 0  (monotone)
+  A_conc <- -diff(diag(ncoef), differences = 2)  # -2nd diff ≥ 0  (concave)
+  Ain    <- rbind(A_mono, A_conc)
+  bin    <- rep(0, nrow(Ain))
+  
+  ## 5 ─ *new* equality constraint f(0) = 0 --------------------------------
+  Ceq <- matrix(predict(X, 0), 1, ncoef)      # row basis at Tc = 0
+  ceq <- 0
+  
+  ## 6 ─ assemble PCLS problem ---------------------------------------------
+  M <- list(
+    X   = X,
+    y   = y,
+    w   = rep(1, length(y)),
+    S   = S,
+    sp  = 1,
+    off = c(0),
+    Ain = Ain,
+    bin = bin,
+    C   = Ceq,        # <<<
+    c   = ceq,        # <<<
+    p   = rep(0, ncoef),
+    rank = ncoef
+  )
+   
+  ## 6 ─ iteratively re-weighted fitting (same as before) -------------------
+  coef_pcls <- pcls(M)
+  y_hat     <- as.vector(X %*% coef_pcls)
+  
+  count.i   <- 0
+  old_pcls  <- coef_pcls + 1           # force first iteration
+  while (sum(abs(old_pcls - coef_pcls)) > 1e-6 && count.i < 100) {
+    old_pcls <- coef_pcls
+    M$w      <- 1 / y_hat              # variance-stabilising weights
+    if (all(Ain %*% coef_pcls >= 0))   # stay feasible
+      M$p <- coef_pcls
+    coef_pcls <- pcls(M)
+    y_hat     <- as.vector(X %*% coef_pcls)
+    count.i   <- count.i + 1
+  }
+  
+  if (plotI) lines(x1, y_hat, col = "red", lwd = 1)
+  
+   
+  list(
+    coef_pcls = coef_pcls,
+    y_hat     = y_hat,
+    fit_func  = function(x) as.vector(predict(X, x) %*% coef_pcls)
+  )
+}
+#Plot1DMonoDen(tc1)
+
+
+
+### Plotting 2D non-decreasing density surface 
+
+Plot2DRaw<- function( Tc.vec,N.vec, plotI=TRUE, nbin=15, 
+                      nlevels = 10,
+                      mains="Histogram with Monotonic Density",
+                      xlab = "Censoring Time", ylab = "Sample Size" ){
+  h <- hist2d( Tc.vec,N.vec, nbin=nbin, show=FALSE,xlab=xlab, ylab=ylab)
+  z=h$count/sum(h$count)
+  xlabs<-as.numeric(unlist(strsplit(  gsub("\\[|\\]|\\(|\\)", "",rownames(z)), ",")))
+  ylabs<-as.numeric(unlist(strsplit(  gsub("\\[|\\]|\\(|\\)", "",colnames(z)), ",")))
+  
+  old_par<-par(mfrow = c(1,2))
+  
+  par(mar = c(1, 1, 0, 0))
+  hist3D(x = seq(min(xlabs), max(xlabs), length.out = nrow(z)) ,
+         y = seq(min(ylabs), max(ylabs), length.out = ncol(z)) , 
+         z=z*1e3, border="black", contour =TRUE,
+         phi = 30, theta = -40, r=1, cex.lab=0.8,
+         ticktype = "detailed", cex.axis = 0.6, nticks = 5, 
+         xlab = "\n Tc", ylab = "\n n", zlab = "\n Density (×10⁻³)",
+         colkey = FALSE
+  )
+  par(mgp = c(1, 0.5, 0))
+  par(mar = c(4.1, 2.1, 2.1, 1))
+  # par(
+  #   mar = c(5.1, 4.1, 4.1, 2.1),    # bottom, left, top, right margins (in lines)
+  #   oma = c(0, 0, 0, 0)     # outer margins
+  # )
+  contour2D(x = seq(min(xlabs), max(xlabs), length.out = nrow(z)) ,
+            y = seq(min(ylabs), max(ylabs), length.out = nrow(z)) , 
+            xlab = "Tc", ylab = "\n n",
+            z = z, lwd = 2, nlevels = 10,
+            col="black",
+            colkey = FALSE)
+  abline(a = 300, b = -7.5)
+  par(mar = c(5.1, 4.1, 4.1, 2.1))
+  par(old_par)
+  
+  
+}
+ 
+Plot2DMonoDen<-function( Tc.vec,N.vec, plotI=TRUE, nbin=15, 
+                         
+                        mains="Histogram with Monotonic Density",
+                        xlab = "Censoring Time", ylab = "Sample Size" ){
+  ## 1 ─ histogram -------------------------------------------------
+  h  <- hist2d(Tc.vec, N.vec, nbin = nbin, show = FALSE,
+               xlab = xlab, ylab = ylab)
+  x1 <- h$x;  x2 <- h$y
+  grid <- expand.grid(x1 = x1, x2 = x2)
+  y    <- c(h$counts / h$nobs)
+  
+  ## 2 ─ tensor-product B-splines ---------------------------------
+  ## ---- basis definition (include 0 in boundaries) ----
+  maxTc <- max(Tc.vec); maxN <- max(N.vec)
+  b1 <- bs(grid$x1, df = 8, intercept = TRUE,
+           Boundary.knots = c(0, maxTc))   # Tc basis
+  b2 <- bs(grid$x2, df = 8, intercept = TRUE,
+           Boundary.knots = c(0, maxN))    # n  basis)
+  X  <- tensor.prod.model.matrix(list(b1, b2))
+  ncoef <- ncol(X)
+  ## ---- identify coefficients lying in the first row/col of 0  ----
+  k1 <- ncol(b1)         # #basis fns in Tc direction
+  k2 <- ncol(b2)         # #basis fns in n  direction
+  coefMat <- matrix(seq_len(k1 * k2), k1, k2, byrow = TRUE)
+  
+  eq.idx <- unique(c(coefMat[1, ],            # row  i = 1  -> f(0, n) = 0
+                     coefMat[, 1]))            # column j = 1 -> f(Tc,0)=0
+  
+  Ceq <- diag(ncoef)[eq.idx, , drop = FALSE]   # pick those rows
+  ceq <- rep(0, length(eq.idx))
+  ## 3 ─ quadratic roughness penalty ------------------------------
+  D1 <- diff(diag(ncol(b1)), differences = 2)
+  D2 <- diff(diag(ncol(b2)), differences = 2)
+  S1 <- kronecker(diag(ncol(b2)), t(D1) %*% D1)
+  S2 <- kronecker(t(D2) %*% D2, diag(ncol(b1)))
+  S  <- list(S1 + S2)
+  
+  ## 4 ─ inequality constraints -----------------------------------
+  ## 4a  monotone (Δ ≥ 0)
+  A1m <- kronecker(diag(ncol(b2)), diff(diag(ncol(b1))))
+  A2m <- kronecker(diff(diag(ncol(b2))), diag(ncol(b1)))
+  ## 4b  concave (−Δ² ≥ 0)
+  A1c <- kronecker(diag(ncol(b2)), -D1)
+  A2c <- kronecker(-D2, diag(ncol(b1)))
+  Ain <- rbind(A1m, A2m, A1c, A2c)
+  bin <- rep(0, nrow(Ain))
+  
+  
+  ## 5 ─ assemble pcls problem -----------------------------------
+  M <- list(X = X, y = y, w = rep(1, length(y)),
+            S = S, sp = 1, off = 0,
+            Ain = Ain, bin = bin,
+            C = Ceq,                 # << equality constraints
+            c = ceq,                 # << zeros
+            p = rep(0, ncoef), rank = ncoef)
+  
+  ## 6 ─ iteratively-reweighted fit -------------------------------
+  coef_pcls <- pcls(M);        y_hat <- as.vector(X %*% coef_pcls)
+  
+  iter <- 0
+  repeat {
+    iter <- iter + 1
+    M$w <- 1 / pmax(y_hat, 1e-9)            # avoid zero weights
+    if (all(Ain %*% coef_pcls >= 0)) M$p <- coef_pcls
+    new_coef <- pcls(M)
+    if (max(abs(new_coef - coef_pcls)) < 1e-6 || iter >= 100) break
+    coef_pcls <- new_coef
+    y_hat     <- as.vector(X %*% coef_pcls)
+  }
+  y_hat <- as.vector(X %*% coef_pcls)
+  
+  # Fit model
+  coef_pcls <- pcls(M)
+  y_hat <- as.vector(X %*% coef_pcls)
+
+  
+if (plotI){
+
+ z=h$count/sum(h$count)
+xlabs<-as.numeric(unlist(strsplit(  gsub("\\[|\\]|\\(|\\)", "",rownames(z)), ",")))
+ylabs<-as.numeric(unlist(strsplit(  gsub("\\[|\\]|\\(|\\)", "",colnames(z)), ",")))
+
+old_par<-par(mfrow = c(1,2))
+
+
+  
+par(mgp = c(1, 0.5, 0))
+par(mar = c(1, 1, 0, 0))
+  
+  
+  # Plot the fitted surface
+  zmat <- matrix(y_hat, length(x1), length(x2))
+  persp3D(x1, x2, zmat*1e3, col = "lightblue", border = "black",
+        ticktype = "detailed", cex.axis = 0.6, nticks = 5, lwd=0.1,
+        xlab = "\n Tc", ylab = "\n n", zlab = "\n Rel.Shannon Info (×10⁻³)",
+        theta= -30, phi=20 , r=5 )
+  par(mar = c(4.1, 2.1, 2.1, 1))
+
+  contour(
+    x = x1,
+    y = x2,
+    z = zmat,
+    nlevels = 15,
+    col = "blue",
+    lwd = 0.5,
+    xlab = "Tc",
+    ylab = "n"
+    #, main = "Contour Lines of Fitted Shanon Information"
+  )
+  abline(a = 150, b = -7.5, col= "red")
+  points(7.333,95,col="black",lwd=2)
+  par(mar = c(5.1, 4.1, 4.1, 2.1))
+  par(old_par)
+
+}
+  
+  
+  
+  list(coef_pcls=coef_pcls,
+       y_hat=y_hat,
+       fit_func= function(w1,w2){
+         B1_w <- predict(b1, w1)  # row vector (1 × k1)
+         B2_w <- predict(b2, w2)  # row vector (1 × k2)
+         
+         # Tensor product of two row vectors: gives 1 × (k1 × k2)
+         X_w <- tensor.prod.model.matrix(list(B1_w, B2_w))  # 1-row design matrix
+         
+           (X_w%*% coef_pcls)
+       }  )
+  
+}
+
+#Plot2DRaw(Tc.vec,N.vec)
+
+#Plot2DResult<-  Plot2DMonoDen(Tc.vec,N.vec)
+
+# pdf("Raw2D.pdf",
+#     width = 6.5,    # match full \textwidth = 6.5 inches
+#     height = 4      # choose an appropriate height
+# )
+# Plot2DRaw(Tc.vec,N.vec)
+# dev.off()
+
+# pdf("Smooth2D.pdf",
+#     width = 6.5,    # match full \textwidth = 6.5 inches
+#     height = 4      # choose an appropriate height
+# )
+# Plot2DMonoDen(Tc.vec,N.vec)
+# dev.off()
+
+
+# -------------------------------------------------------
+# Shannon-information objective  G(n, Tc) of Weibull with known shape kappa
+# -------------------------------------------------------
+
+G_n_Tc_1 <- function(n, Tc, alpha, beta, kappa = 1,
+                   rel.tol = 1e-6, abs.tol = 0) {
+  
+  stopifnot(n >= 1, Tc > 0, alpha > 2, beta > 0, kappa > 0)
+  
+  #----- helper: D_r(t) ---------------------------------
+  D_r <- function(t, r) {
+    if (r == 0) return(0)
+    coef <- choose(n, r) / factorial(r - 1)      # binom * 1/(r-1)!
+    # vectorised inner sum over i = 0..r
+    inner <- vapply(0:r, function(i)
+      choose(r, i) * (-1)^i *
+        pmax(0, t - Tc^kappa * (n - r + i))^(r - 1),  # pmax = max(0,·)
+      numeric(length(t)))
+    coef * rowSums(inner)
+  }
+  
+  #----- closed-form first two terms --------------------
+  term0 <- -alpha * beta^alpha * n * Tc^kappa /
+    (beta + n * Tc^kappa)^(alpha + 1)
+  term1 <- -alpha * beta^alpha /
+    (beta + n * Tc^kappa)^alpha *
+    log(beta / (beta + n * Tc^kappa))
+  
+  #----- integrand for a given r ------------------------
+  integrand_r <- function(t, r) {
+    Dr   <- D_r(t, r)
+    core <- beta^alpha * exp(lgamma(alpha + r) - lgamma(alpha)) /
+      (beta + t)^(alpha + r)
+    bracket <- r * digamma(alpha + r) -
+      t * (alpha + r) / (beta + t) -
+      alpha * log(beta / (beta + t)) -
+      (lgamma(alpha + r) - lgamma(alpha))
+    Dr * core * bracket
+  }
+  
+  #----- numerical integration over t -------------------
+  upper <- n * Tc^kappa          # integrand = 0 beyond this
+  int_sum <- 0
+  for (r in 1:n) {
+    int_sum <- int_sum +
+      integrate(integrand_r, lower = 0, upper = upper,
+                r = r, rel.tol = rel.tol, abs.tol = abs.tol)$value
+  }
+  
+  term0 + term1 + int_sum
+}
+
+G_Tc <- function(n, Tc, alpha, beta, kappa = 1,
+                   rel.tol = 1e-6, abs.tol = 0){ 
+  sapply(Tc,  G_n_Tc_1, n=n, alpha=alpha, beta=beta, kappa=kappa,
+                    rel.tol=rel.tol, abs.tol=abs.tol)
+  
+}
+
+G_n <- function(n, Tc, alpha, beta, kappa = 1,
+                 rel.tol = 1e-6, abs.tol = 0){ 
+  sapply(n,  G_n_Tc_1, Tc=Tc, alpha=alpha, beta=beta, kappa=kappa,
+         rel.tol=rel.tol, abs.tol=abs.tol)
+}
+
+G_Tc(n=20, Tc=c(1,3), alpha=6, beta=2)
+
+G_n(n=c(20,50), Tc=3, alpha=6, beta=2)
+
+# -------------------------------------------------------
+# Bayesian Fisher information of exponential
+# -------------------------------------------------------
+
+BFI<- function(n,Tc, alpha, beta,kappa=1){
+ A<-alpha; B<-beta; N<-n
+(B^2 - (B^A / ((Tc^kappa + B)^(A - 2)))) * (N / (A^2 - 3 * A + 2))
+}
+
+#BFI(n=20,Tc=3.0, alpha=6, beta=2)
+
